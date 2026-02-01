@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">GDriveSync</string>
+    <string name="sync_status">Statut de synchronisation</string>
+    <string name="select_folder">Sélectionner un dossier</string>
+    <string name="sync_now">Synchroniser maintenant</string>
+    <string name="settings">Paramètres</string>
+    <string name="not_configured">Non configuré</string>
+    <string name="syncing">Synchronisation en cours...</string>
+    <string name="last_sync">Dernière synchronisation: %1$s</string>
+    <string name="folder_name">Dossier: %1$s</string>
+    <string name="sign_in">Se connecter à Google</string>
+    <string name="sign_out">Se déconnecter</string>
+    <string name="select_drive_folder">Sélectionner un dossier Google Drive</string>
+    <string name="local_folder">Dossier local</string>
+    <string name="drive_folder">Dossier Drive</string>
+    <string name="auto_sync">Synchronisation automatique</string>
+    <string name="sync_interval">Intervalle de synchronisation (minutes)</string>
+</resources>
+
+
