@@ -15,6 +15,8 @@ import com.google.api.services.drive.model.Change
 import com.google.api.services.drive.model.ChangeList
 import com.google.api.services.drive.model.File
 import com.google.api.services.drive.model.FileList
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.FileOutputStream
 import java.io.IOException
 import java.util.Collections
@@ -87,10 +89,12 @@ class GoogleDriveService(private val context: Context) {
         driveService = null
     }
     
-    suspend fun listFiles(folderId: String? = null): List<File> {
-        return try {
+    suspend fun listFiles(folderId: String? = null): List<File> = withContext(Dispatchers.IO) {
+        try {
             // S'assurer que le service est initialisé
             ensureDriveServiceInitialized()
+            
+            val service = driveService ?: throw IllegalStateException("Service Drive non initialisé")
             
             val query = if (folderId != null) {
                 "'$folderId' in parents and trashed = false"
@@ -99,33 +103,50 @@ class GoogleDriveService(private val context: Context) {
                 "'root' in parents and trashed = false"
             }
             
-            val result: FileList = driveService?.files()?.list()
-                ?.setQ(query)
-                ?.setFields("files(id, name, mimeType, size, modifiedTime, parents)")
-                ?.execute() ?: return emptyList()
+            // Récupérer toutes les pages si nécessaire
+            val allFiles = mutableListOf<File>()
+            var pageToken: String? = null
             
-            result.files ?: emptyList()
+            do {
+                val request = service.files().list()
+                    .setQ(query)
+                    .setFields("files(id, name, mimeType, size, modifiedTime, parents)")
+                    .setPageSize(100) // Limiter à 100 résultats par page
+                
+                if (pageToken != null) {
+                    request.setPageToken(pageToken)
+                }
+                
+                val pageResult: FileList = request.execute()
+                pageResult.files?.let { allFiles.addAll(it) }
+                pageToken = pageResult.nextPageToken
+            } while (pageToken != null)
+            
+            allFiles
         } catch (e: Exception) {
-            emptyList()
+            // Propager l'exception pour permettre une meilleure gestion des erreurs
+            throw Exception("Erreur lors de la récupération des fichiers: ${e.message}", e)
         }
     }
     
-    suspend fun getFileMetadata(fileId: String): File? {
-        return try {
+    suspend fun getFileMetadata(fileId: String): File? = withContext(Dispatchers.IO) {
+        try {
             ensureDriveServiceInitialized()
-            driveService?.files()?.get(fileId)
-                ?.setFields("id, name, mimeType, size, modifiedTime, parents")
-                ?.execute()
+            val service = driveService ?: return@withContext null
+            service.files().get(fileId)
+                .setFields("id, name, mimeType, size, modifiedTime, parents")
+                .execute()
         } catch (e: Exception) {
             null
         }
     }
     
-    suspend fun downloadFile(fileId: String, localFile: java.io.File): Boolean {
-        return try {
+    suspend fun downloadFile(fileId: String, localFile: java.io.File): Boolean = withContext(Dispatchers.IO) {
+        try {
             ensureDriveServiceInitialized()
+            val service = driveService ?: return@withContext false
             val outputStream = FileOutputStream(localFile)
-            driveService?.files()?.get(fileId)?.executeMediaAndDownloadTo(outputStream)
+            service.files().get(fileId).executeMediaAndDownloadTo(outputStream)
             outputStream.close()
             true
         } catch (e: Exception) {
@@ -133,9 +154,10 @@ class GoogleDriveService(private val context: Context) {
         }
     }
     
-    suspend fun uploadFile(localFile: java.io.File, fileName: String, parentFolderId: String?): String? {
-        return try {
+    suspend fun uploadFile(localFile: java.io.File, fileName: String, parentFolderId: String?): String? = withContext(Dispatchers.IO) {
+        try {
             ensureDriveServiceInitialized()
+            val service = driveService ?: return@withContext null
             val fileMetadata = File().apply {
                 name = fileName
                 if (parentFolderId != null) {
@@ -144,38 +166,43 @@ class GoogleDriveService(private val context: Context) {
             }
             
             val mediaContent = FileContent("application/octet-stream", localFile)
-            val file = driveService?.files()?.create(fileMetadata, mediaContent)
-                ?.setFields("id")
-                ?.execute()
+            val file = service.files().create(fileMetadata, mediaContent)
+                .setFields("id")
+                .execute()
             
-            file?.id
+            file.id
         } catch (e: Exception) {
             null
         }
     }
     
-    suspend fun updateFile(fileId: String, localFile: java.io.File): Boolean {
-        return try {
+    suspend fun updateFile(fileId: String, localFile: java.io.File): Boolean = withContext(Dispatchers.IO) {
+        try {
             ensureDriveServiceInitialized()
+            val service = driveService ?: return@withContext false
             val mediaContent = FileContent("application/octet-stream", localFile)
-            driveService?.files()?.update(fileId, null, mediaContent)?.execute()
+            service.files().update(fileId, null, mediaContent).execute()
             true
         } catch (e: Exception) {
             false
         }
     }
     
-    suspend fun deleteFile(fileId: String): Boolean {
-        return try {
-            driveService?.files()?.delete(fileId)?.execute()
+    suspend fun deleteFile(fileId: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            ensureDriveServiceInitialized()
+            val service = driveService ?: return@withContext false
+            service.files().delete(fileId).execute()
             true
         } catch (e: Exception) {
             false
         }
     }
     
-    suspend fun createFolder(folderName: String, parentFolderId: String?): String? {
-        return try {
+    suspend fun createFolder(folderName: String, parentFolderId: String?): String? = withContext(Dispatchers.IO) {
+        try {
+            ensureDriveServiceInitialized()
+            val service = driveService ?: return@withContext null
             val fileMetadata = File().apply {
                 name = folderName
                 mimeType = "application/vnd.google-apps.folder"
@@ -184,18 +211,20 @@ class GoogleDriveService(private val context: Context) {
                 }
             }
             
-            val file = driveService?.files()?.create(fileMetadata)
-                ?.setFields("id")
-                ?.execute()
+            val file = service.files().create(fileMetadata)
+                .setFields("id")
+                .execute()
             
-            file?.id
+            file.id
         } catch (e: Exception) {
             null
         }
     }
     
-    suspend fun searchFolder(folderName: String, parentId: String? = null): File? {
-        return try {
+    suspend fun searchFolder(folderName: String, parentId: String? = null): File? = withContext(Dispatchers.IO) {
+        try {
+            ensureDriveServiceInitialized()
+            val service = driveService ?: return@withContext null
             val query = buildString {
                 append("mimeType = 'application/vnd.google-apps.folder'")
                 append(" and name = '$folderName'")
@@ -205,11 +234,11 @@ class GoogleDriveService(private val context: Context) {
                 }
             }
             
-            val result: FileList = driveService?.files()?.list()
-                ?.setQ(query)
-                ?.setFields("files(id, name)")
-                ?.setPageSize(1)
-                ?.execute() ?: return null
+            val result: FileList = service.files().list()
+                .setQ(query)
+                .setFields("files(id, name)")
+                .setPageSize(1)
+                .execute()
             
             result.files?.firstOrNull()
         } catch (e: Exception) {
@@ -220,11 +249,12 @@ class GoogleDriveService(private val context: Context) {
     /**
      * Récupère le token de changement actuel pour commencer la surveillance
      */
-    suspend fun getStartPageToken(): String? {
-        return try {
+    suspend fun getStartPageToken(): String? = withContext(Dispatchers.IO) {
+        try {
             ensureDriveServiceInitialized()
-            val response = driveService?.changes()?.getStartPageToken()?.execute()
-            response?.startPageToken
+            val service = driveService ?: return@withContext null
+            val response = service.changes().getStartPageToken().execute()
+            response.startPageToken
         } catch (e: Exception) {
             null
         }
@@ -234,13 +264,14 @@ class GoogleDriveService(private val context: Context) {
      * Récupère la liste des changements depuis un token donné
      * Retourne la liste des changements et le nouveau token
      */
-    suspend fun getChanges(pageToken: String, folderId: String? = null): Pair<List<Change>, String?> {
-        return try {
+    suspend fun getChanges(pageToken: String, folderId: String? = null): Pair<List<Change>, String?> = withContext(Dispatchers.IO) {
+        try {
             ensureDriveServiceInitialized()
-            val request = driveService?.changes()?.list(pageToken)
-                ?.setFields("nextPageToken, changes(fileId, file(id, name, mimeType, size, modifiedTime, parents, trashed)))")
+            val service = driveService ?: return@withContext Pair(emptyList(), null)
+            val request = service.changes().list(pageToken)
+                .setFields("nextPageToken, changes(fileId, file(id, name, mimeType, size, modifiedTime, parents, trashed)))")
             
-            val result: ChangeList = request?.execute() ?: return Pair(emptyList(), null)
+            val result: ChangeList = request.execute()
             
             // Filtrer les changements pour ne garder que ceux du dossier surveillé
             val changes = result.changes?.filter { change ->

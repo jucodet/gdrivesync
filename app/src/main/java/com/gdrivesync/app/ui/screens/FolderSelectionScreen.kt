@@ -6,6 +6,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -23,10 +25,6 @@ fun FolderSelectionScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     
-    LaunchedEffect(Unit) {
-        viewModel.loadFolders()
-    }
-    
     Scaffold(
         topBar = {
             TopAppBar(
@@ -34,6 +32,14 @@ fun FolderSelectionScreen(
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Retour")
+                    }
+                },
+                actions = {
+                    IconButton(
+                        onClick = { viewModel.loadFolders() },
+                        enabled = !uiState.isLoading
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Actualiser")
                     }
                 }
             )
@@ -54,78 +60,221 @@ fun FolderSelectionScreen(
             } else {
                 val errorMessage = uiState.error
                 if (errorMessage != null) {
-                    Card(
+                    Column(
                         modifier = Modifier
-                            .fillMaxWidth()
+                            .fillMaxSize()
                             .padding(16.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.errorContainer
-                        )
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        Text(
-                            text = errorMessage,
-                            modifier = Modifier.padding(16.dp),
-                            color = MaterialTheme.colorScheme.onErrorContainer
-                        )
-                    }
-                } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    item {
                         Card(
                             modifier = Modifier.fillMaxWidth(),
-                            onClick = {
-                                onFolderSelected("root", "Racine")
-                                onNavigateBack()
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.errorContainer
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "Erreur",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                                Text(
+                                    text = errorMessage,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
                             }
+                        }
+                        Button(
+                            onClick = { viewModel.loadFolders() },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Réessayer")
+                        }
+                    }
+                } else {
+                Column(
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    // Breadcrumbs
+                    if (uiState.breadcrumbs.isNotEmpty()) {
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
                         ) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(16.dp),
+                                    .padding(12.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                horizontalArrangement = Arrangement.Start
                             ) {
-                                Icon(
-                                    Icons.Default.Folder,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(32.dp)
-                                )
-                                Text(
-                                    text = "Racine",
-                                    style = MaterialTheme.typography.bodyLarge
-                                )
+                                uiState.breadcrumbs.forEachIndexed { index, breadcrumb ->
+                                    if (index > 0) {
+                                        Icon(
+                                            Icons.Default.ChevronRight,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                    }
+                                    TextButton(
+                                        onClick = {
+                                            viewModel.navigateToBreadcrumb(breadcrumb.id)
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                    ) {
+                                        Text(
+                                            text = breadcrumb.name,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (index == uiState.breadcrumbs.size - 1) {
+                                                MaterialTheme.colorScheme.primary
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                            }
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
                     
-                    items(uiState.folders) { folder ->
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = {
-                                onFolderSelected(folder.id, folder.name)
-                                onNavigateBack()
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // Option pour sélectionner le dossier actuel (si on n'est pas à la racine)
+                        if (uiState.currentFolderId != null && uiState.currentFolderId != "root") {
+                            item {
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                                    ),
+                                    onClick = {
+                                        val currentBreadcrumb = uiState.breadcrumbs.lastOrNull()
+                                        if (currentBreadcrumb != null) {
+                                            onFolderSelected(currentBreadcrumb.id, currentBreadcrumb.name)
+                                            onNavigateBack()
+                                        }
+                                    }
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(16.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Folder,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(32.dp),
+                                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                                        )
+                                        Column {
+                                            Text(
+                                                text = "Sélectionner ce dossier",
+                                                style = MaterialTheme.typography.bodyLarge,
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                            )
+                                            Text(
+                                                text = uiState.breadcrumbs.lastOrNull()?.name ?: "Dossier",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                                            )
+                                        }
+                                    }
+                                }
                             }
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(16.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        }
+                        
+                        // Option pour sélectionner la racine (si on est à la racine)
+                        if (uiState.currentFolderId == null || uiState.currentFolderId == "root") {
+                            item {
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                                    ),
+                                    onClick = {
+                                        onFolderSelected("root", "Racine")
+                                        onNavigateBack()
+                                    }
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(16.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Folder,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(32.dp),
+                                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                                        )
+                                        Text(
+                                            text = "Sélectionner la racine",
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Liste des sous-dossiers
+                        items(uiState.folders) { folder ->
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                onClick = {
+                                    // Naviguer dans le dossier au lieu de le sélectionner directement
+                                    viewModel.navigateToFolder(folder.id)
+                                }
                             ) {
-                                Icon(
-                                    Icons.Default.Folder,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(32.dp)
-                                )
-                                Text(
-                                    text = folder.name,
-                                    style = MaterialTheme.typography.bodyLarge
-                                )
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Folder,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(32.dp)
+                                        )
+                                        Text(
+                                            text = folder.name,
+                                            style = MaterialTheme.typography.bodyLarge
+                                        )
+                                    }
+                                    Icon(
+                                        Icons.Default.ChevronRight,
+                                        contentDescription = "Ouvrir",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
                     }
