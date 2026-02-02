@@ -54,7 +54,32 @@ class GoogleDriveService(private val context: Context) {
     
     fun isSignedIn(): Boolean {
         val account = GoogleSignIn.getLastSignedInAccount(context)
-        return account != null && driveService != null
+        if (account == null) {
+            return false
+        }
+        
+        // Si le service n'est pas initialisé mais qu'un compte est connecté, l'initialiser
+        if (driveService == null) {
+            try {
+                initializeDriveService(account)
+            } catch (e: Exception) {
+                return false
+            }
+        }
+        
+        return driveService != null
+    }
+    
+    /**
+     * S'assure que le service Drive est initialisé si un compte est connecté
+     */
+    private fun ensureDriveServiceInitialized() {
+        if (driveService == null) {
+            val account = GoogleSignIn.getLastSignedInAccount(context)
+            account?.let {
+                initializeDriveService(it)
+            }
+        }
     }
     
     fun signOut() {
@@ -64,10 +89,14 @@ class GoogleDriveService(private val context: Context) {
     
     suspend fun listFiles(folderId: String? = null): List<File> {
         return try {
+            // S'assurer que le service est initialisé
+            ensureDriveServiceInitialized()
+            
             val query = if (folderId != null) {
                 "'$folderId' in parents and trashed = false"
             } else {
-                "trashed = false"
+                // Pour la racine, récupérer uniquement les fichiers qui ont "root" comme parent
+                "'root' in parents and trashed = false"
             }
             
             val result: FileList = driveService?.files()?.list()
@@ -83,6 +112,7 @@ class GoogleDriveService(private val context: Context) {
     
     suspend fun getFileMetadata(fileId: String): File? {
         return try {
+            ensureDriveServiceInitialized()
             driveService?.files()?.get(fileId)
                 ?.setFields("id, name, mimeType, size, modifiedTime, parents")
                 ?.execute()
@@ -93,6 +123,7 @@ class GoogleDriveService(private val context: Context) {
     
     suspend fun downloadFile(fileId: String, localFile: java.io.File): Boolean {
         return try {
+            ensureDriveServiceInitialized()
             val outputStream = FileOutputStream(localFile)
             driveService?.files()?.get(fileId)?.executeMediaAndDownloadTo(outputStream)
             outputStream.close()
@@ -104,6 +135,7 @@ class GoogleDriveService(private val context: Context) {
     
     suspend fun uploadFile(localFile: java.io.File, fileName: String, parentFolderId: String?): String? {
         return try {
+            ensureDriveServiceInitialized()
             val fileMetadata = File().apply {
                 name = fileName
                 if (parentFolderId != null) {
@@ -124,6 +156,7 @@ class GoogleDriveService(private val context: Context) {
     
     suspend fun updateFile(fileId: String, localFile: java.io.File): Boolean {
         return try {
+            ensureDriveServiceInitialized()
             val mediaContent = FileContent("application/octet-stream", localFile)
             driveService?.files()?.update(fileId, null, mediaContent)?.execute()
             true
@@ -189,6 +222,7 @@ class GoogleDriveService(private val context: Context) {
      */
     suspend fun getStartPageToken(): String? {
         return try {
+            ensureDriveServiceInitialized()
             val response = driveService?.changes()?.getStartPageToken()?.execute()
             response?.startPageToken
         } catch (e: Exception) {
@@ -202,6 +236,7 @@ class GoogleDriveService(private val context: Context) {
      */
     suspend fun getChanges(pageToken: String, folderId: String? = null): Pair<List<Change>, String?> {
         return try {
+            ensureDriveServiceInitialized()
             val request = driveService?.changes()?.list(pageToken)
                 ?.setFields("nextPageToken, changes(fileId, file(id, name, mimeType, size, modifiedTime, parents, trashed)))")
             

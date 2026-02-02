@@ -45,7 +45,7 @@ android {
     }
     
     composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.4"
+        kotlinCompilerExtensionVersion = "1.5.8"
     }
     
     // Configuration KAPT pour Java 17+
@@ -63,6 +63,13 @@ android {
             option("--add-opens", "jdk.compiler/com.sun.tools.javac.processing=ALL-UNNAMED")
             option("--add-opens", "jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED")
             option("--add-opens", "jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED")
+        }
+    }
+    
+    // Configuration supplémentaire pour les tâches KAPT
+    tasks.withType<org.jetbrains.kotlin.gradle.internal.KaptGenerateStubsTask>().configureEach {
+        kotlinOptions {
+            jvmTarget = "17"
         }
     }
     

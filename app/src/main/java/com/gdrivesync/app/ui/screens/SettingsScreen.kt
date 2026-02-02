@@ -1,6 +1,9 @@
 package com.gdrivesync.app.ui.screens
 
 import android.app.Activity
+import android.app.Activity.RESULT_OK
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -14,6 +17,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.gdrivesync.app.ui.viewmodel.SettingsViewModel
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInAccount
+import com.google.android.gms.common.api.ApiException
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -25,24 +29,61 @@ fun SettingsScreen(
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     
-    LaunchedEffect(Unit) {
-        viewModel.loadSettings()
-    }
-    
-    // Écouter la sélection de dossier depuis FolderSelectionScreen
-    LaunchedEffect(Unit) {
-        // Cette logique sera gérée par le ViewModel via un callback
-    }
-    
-    // Gérer le résultat de la connexion Google
-    val activity = context as? Activity
-    LaunchedEffect(Unit) {
-        activity?.let {
-            val account = GoogleSignIn.getLastSignedInAccount(it)
-            if (account != null) {
-                viewModel.onGoogleSignInSuccess(account)
+    // Launcher pour gérer le résultat de l'authentification Google
+    val signInLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val data = result.data
+        
+        // Même si resultCode n'est pas OK, on essaie quand même de récupérer le compte
+        // car Google Sign-In peut parfois retourner un compte valide même avec un code différent
+        if (data != null) {
+            val task = GoogleSignIn.getSignedInAccountFromIntent(data)
+            try {
+                val account = task.getResult(ApiException::class.java)
+                if (account != null) {
+                    viewModel.onGoogleSignInSuccess(account)
+                    return@rememberLauncherForActivityResult
+                }
+            } catch (e: ApiException) {
+                // Si c'est une erreur d'authentification, afficher le code d'erreur
+                val errorMessage = when (e.statusCode) {
+                    12500 -> "Erreur de configuration Google Play Services"
+                    7 -> "Erreur réseau lors de la connexion"
+                    8 -> "Erreur interne"
+                    10 -> "Erreur de développement (vérifier la configuration OAuth)"
+                    else -> "Erreur Google Sign-In (code: ${e.statusCode})"
+                }
+                viewModel.onGoogleSignInError(errorMessage)
+                return@rememberLauncherForActivityResult
+            } catch (e: Exception) {
+                viewModel.onGoogleSignInError("Erreur: ${e.message ?: "inconnue"}")
+                return@rememberLauncherForActivityResult
             }
         }
+        
+        // Si on arrive ici, c'est que l'utilisateur a probablement annulé
+        // ou qu'il n'y a pas de données dans l'intent
+        // Mais vérifions quand même si un compte est déjà connecté
+        val activity = context as? Activity
+        if (activity != null) {
+            val lastAccount = GoogleSignIn.getLastSignedInAccount(activity)
+            if (lastAccount != null) {
+                // Un compte est connecté, utilisons-le
+                viewModel.onGoogleSignInSuccess(lastAccount)
+                return@rememberLauncherForActivityResult
+            }
+        }
+        
+        if (result.resultCode != RESULT_OK) {
+            viewModel.onGoogleSignInCancelled()
+        } else {
+            viewModel.onGoogleSignInError("Réponse Google invalide")
+        }
+    }
+    
+    LaunchedEffect(Unit) {
+        viewModel.loadSettings()
     }
     
     Scaffold(
@@ -94,14 +135,34 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.error
                         )
+                        val signInError = uiState.signInError
+                        if (signInError != null) {
+                            Text(
+                                text = signInError,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
                         Button(
                             onClick = {
+                                viewModel.onGoogleSignInStart()
                                 val signInIntent = viewModel.getSignInIntent()
-                                activity?.startActivityForResult(signInIntent, 1001)
+                                signInLauncher.launch(signInIntent)
                             },
                             modifier = Modifier.fillMaxWidth()
+                            ,
+                            enabled = !uiState.isSigningIn
                         ) {
-                            Text("Se connecter à Google")
+                            if (uiState.isSigningIn) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text("Connexion…")
+                            } else {
+                                Text("Se connecter à Google")
+                            }
                         }
                     }
                 }
