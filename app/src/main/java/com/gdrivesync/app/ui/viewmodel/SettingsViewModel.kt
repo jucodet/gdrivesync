@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.gdrivesync.app.data.google.GoogleDriveService
 import com.gdrivesync.app.data.preferences.PreferencesManager
 import com.gdrivesync.app.util.SyncScheduler
+import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInAccount
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -60,7 +61,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun loadSettings() {
         viewModelScope.launch {
             val isSignedIn = driveService.isSignedIn()
-            val account = com.google.android.gms.auth.GoogleSignIn.getLastSignedInAccount(getApplication())
+            val account = GoogleSignIn.getLastSignedInAccount(getApplication())
             
             _uiState.value = _uiState.value.copy(
                 isSignedIn = isSignedIn,
