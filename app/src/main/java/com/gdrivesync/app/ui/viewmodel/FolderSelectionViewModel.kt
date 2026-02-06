@@ -45,9 +45,14 @@ class FolderSelectionViewModel(application: Application) : AndroidViewModel(appl
             try {
                 // Vérifier que l'utilisateur est connecté
                 if (!driveService.isSignedIn()) {
+                    val errorMessage = if (!driveService.hasCorrectScope()) {
+                        "Le compte connecté n'a pas les bonnes permissions. Veuillez vous déconnecter et vous reconnecter dans les paramètres pour autoriser l'accès à Google Drive."
+                    } else {
+                        "Non connecté à Google Drive. Veuillez vous connecter dans les paramètres."
+                    }
                     _uiState.value = _uiState.value.copy(
                         isLoading = false,
-                        error = "Non connecté à Google Drive. Veuillez vous connecter dans les paramètres."
+                        error = errorMessage
                     )
                     return@launch
                 }
@@ -55,11 +60,19 @@ class FolderSelectionViewModel(application: Application) : AndroidViewModel(appl
                 // Récupérer les fichiers dans le dossier spécifié (ou à la racine)
                 val files = driveService.listFiles(folderId)
                 
+                // Debug: Afficher le nombre de fichiers récupérés
+                android.util.Log.d("FolderSelection", "Fichiers récupérés: ${files.size}")
+                files.forEach { file ->
+                    android.util.Log.d("FolderSelection", "Fichier: ${file.name}, Type: ${file.mimeType}, ID: ${file.id}")
+                }
+                
                 // Filtrer uniquement les dossiers
                 val folders = files
                     .filter { it.mimeType == "application/vnd.google-apps.folder" }
                     .map { FolderItem(it.id, it.name) }
                     .sortedBy { it.name.lowercase() }
+                
+                android.util.Log.d("FolderSelection", "Dossiers trouvés: ${folders.size}")
                 
                 // Mettre à jour les breadcrumbs si on navigue dans un dossier
                 val breadcrumbs = if (folderId != null && folderId != "root") {

@@ -7,6 +7,7 @@ import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.Scope
 import com.google.api.client.extensions.android.http.AndroidHttp
 import com.google.api.client.googleapis.extensions.android.gms.auth.GoogleAccountCredential
+import com.google.api.client.googleapis.extensions.android.gms.auth.UserRecoverableAuthIOException
 import com.google.api.client.http.FileContent
 import com.google.api.client.json.gson.GsonFactory
 import com.google.api.services.drive.Drive
@@ -25,7 +26,8 @@ class GoogleDriveService(private val context: Context) {
     
     companion object {
         private const val REQUEST_CODE_SIGN_IN = 1001
-        private val SCOPES = Collections.singletonList(DriveScopes.DRIVE_FILE)
+        // Utiliser DRIVE_READONLY pour lire tous les fichiers, ou DRIVE pour lecture/écriture
+        private val SCOPES = Collections.singletonList(DriveScopes.DRIVE_READONLY)
     }
     
     private var driveService: Drive? = null
@@ -34,7 +36,7 @@ class GoogleDriveService(private val context: Context) {
         context,
         GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
             .requestEmail()
-            .requestScopes(Scope(DriveScopes.DRIVE_FILE))
+            .requestScopes(Scope(DriveScopes.DRIVE_READONLY))
             .build()
     ).signInIntent
     
@@ -60,11 +62,30 @@ class GoogleDriveService(private val context: Context) {
             return false
         }
         
+        // Vérifier si le compte a les bons scopes
+        val grantedScopes = account.grantedScopes
+        val requiredScope = DriveScopes.DRIVE_READONLY
+        val hasCorrectScope = grantedScopes?.any { 
+            it.toString() == requiredScope 
+        } ?: false
+        
+        android.util.Log.d("GoogleDriveService", "Compte connecté: ${account.email}")
+        android.util.Log.d("GoogleDriveService", "Scopes accordés: ${grantedScopes?.joinToString()}")
+        android.util.Log.d("GoogleDriveService", "Scope requis: $requiredScope")
+        android.util.Log.d("GoogleDriveService", "A le bon scope: $hasCorrectScope")
+        
+        // Si le compte n'a pas le bon scope, il faut se reconnecter
+        if (!hasCorrectScope) {
+            android.util.Log.w("GoogleDriveService", "Le compte n'a pas le bon scope. Reconnexion nécessaire.")
+            return false
+        }
+        
         // Si le service n'est pas initialisé mais qu'un compte est connecté, l'initialiser
         if (driveService == null) {
             try {
                 initializeDriveService(account)
             } catch (e: Exception) {
+                android.util.Log.e("GoogleDriveService", "Erreur lors de l'initialisation", e)
                 return false
             }
         }
@@ -73,13 +94,27 @@ class GoogleDriveService(private val context: Context) {
     }
     
     /**
+     * Vérifie si le compte connecté a le bon scope
+     */
+    fun hasCorrectScope(): Boolean {
+        val account = GoogleSignIn.getLastSignedInAccount(context) ?: return false
+        val grantedScopes = account.grantedScopes
+        val requiredScope = DriveScopes.DRIVE_READONLY
+        return grantedScopes?.any { it.toString() == requiredScope } ?: false
+    }
+    
+    /**
      * S'assure que le service Drive est initialisé si un compte est connecté
      */
     private fun ensureDriveServiceInitialized() {
         if (driveService == null) {
             val account = GoogleSignIn.getLastSignedInAccount(context)
-            account?.let {
-                initializeDriveService(it)
+            if (account != null) {
+                android.util.Log.d("GoogleDriveService", "Initialisation du service avec le compte: ${account.email}")
+                initializeDriveService(account)
+                android.util.Log.d("GoogleDriveService", "Service initialisé avec scope: ${SCOPES.joinToString()}")
+            } else {
+                android.util.Log.w("GoogleDriveService", "Aucun compte connecté")
             }
         }
     }
@@ -91,39 +126,95 @@ class GoogleDriveService(private val context: Context) {
     
     suspend fun listFiles(folderId: String? = null): List<File> = withContext(Dispatchers.IO) {
         try {
+            android.util.Log.d("GoogleDriveService", "listFiles appelé, folderId: $folderId")
+            
             // S'assurer que le service est initialisé
             ensureDriveServiceInitialized()
             
             val service = driveService ?: throw IllegalStateException("Service Drive non initialisé")
+            android.util.Log.d("GoogleDriveService", "Service Drive initialisé")
             
-            val query = if (folderId != null) {
+            val query = if (folderId != null && folderId != "root") {
                 "'$folderId' in parents and trashed = false"
             } else {
                 // Pour la racine, récupérer uniquement les fichiers qui ont "root" comme parent
-                "'root' in parents and trashed = false"
+                // Note: Certains fichiers peuvent ne pas avoir "root" dans parents si partagés
+                // On essaie d'abord avec 'root' in parents, sinon on peut essayer sans filtre
+                "trashed = false and 'root' in parents"
             }
             
-            // Récupérer toutes les pages si nécessaire
-            val allFiles = mutableListOf<File>()
+            android.util.Log.d("GoogleDriveService", "Requête: $query, folderId: $folderId")
+            
+            // Si aucun résultat avec 'root' in parents, essayer sans ce filtre
+            var allFiles = mutableListOf<File>()
             var pageToken: String? = null
+            var hasResults = false
             
             do {
                 val request = service.files().list()
                     .setQ(query)
                     .setFields("files(id, name, mimeType, size, modifiedTime, parents)")
-                    .setPageSize(100) // Limiter à 100 résultats par page
+                    .setPageSize(100)
                 
                 if (pageToken != null) {
                     request.setPageToken(pageToken)
                 }
                 
                 val pageResult: FileList = request.execute()
-                pageResult.files?.let { allFiles.addAll(it) }
+                android.util.Log.d("GoogleDriveService", "Page récupérée: ${pageResult.files?.size ?: 0} fichiers")
+                
+                if (pageResult.files != null && pageResult.files!!.isNotEmpty()) {
+                    hasResults = true
+                    pageResult.files?.let { 
+                        allFiles.addAll(it)
+                        it.forEach { file ->
+                            android.util.Log.d("GoogleDriveService", "  - ${file.name} (${file.mimeType})")
+                        }
+                    }
+                }
                 pageToken = pageResult.nextPageToken
             } while (pageToken != null)
             
-            allFiles
+            // Si aucun résultat avec 'root' in parents et qu'on est à la racine, essayer sans filtre parent
+            if (!hasResults && (folderId == null || folderId == "root")) {
+                android.util.Log.d("GoogleDriveService", "Aucun résultat avec 'root' in parents, essai sans filtre parent")
+                val alternativeQuery = "trashed = false"
+                pageToken = null
+                
+                do {
+                    val request = service.files().list()
+                        .setQ(alternativeQuery)
+                        .setFields("files(id, name, mimeType, size, modifiedTime, parents)")
+                        .setPageSize(100)
+                    
+                    if (pageToken != null) {
+                        request.setPageToken(pageToken)
+                    }
+                    
+                    val pageResult: FileList = request.execute()
+                    android.util.Log.d("GoogleDriveService", "Page alternative récupérée: ${pageResult.files?.size ?: 0} fichiers")
+                    
+                    pageResult.files?.let { 
+                        // Filtrer pour ne garder que ceux qui ont "root" dans parents ou pas de parents
+                        val rootFiles = it.filter { file ->
+                            file.parents == null || file.parents.isEmpty() || file.parents.contains("root")
+                        }
+                        allFiles.addAll(rootFiles)
+                        rootFiles.forEach { file ->
+                            android.util.Log.d("GoogleDriveService", "  - ${file.name} (${file.mimeType}), parents: ${file.parents}")
+                        }
+                    }
+                    pageToken = pageResult.nextPageToken
+                } while (pageToken != null)
+            }
+            
+            android.util.Log.d("GoogleDriveService", "Total fichiers récupérés: ${allFiles.size}")
+            return@withContext allFiles
+        } catch (e: UserRecoverableAuthIOException) {
+            android.util.Log.e("GoogleDriveService", "Autorisation requise - reconnexion nécessaire", e)
+            throw Exception("Autorisation requise. Veuillez vous déconnecter et vous reconnecter dans les paramètres pour autoriser l'accès à Google Drive.", e)
         } catch (e: Exception) {
+            android.util.Log.e("GoogleDriveService", "Erreur lors de la récupération des fichiers", e)
             // Propager l'exception pour permettre une meilleure gestion des erreurs
             throw Exception("Erreur lors de la récupération des fichiers: ${e.message}", e)
         }
