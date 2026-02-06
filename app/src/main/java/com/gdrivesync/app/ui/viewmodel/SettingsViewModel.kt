@@ -2,6 +2,9 @@ package com.gdrivesync.app.ui.viewmodel
 
 import android.app.Application
 import android.content.Intent
+import android.net.Uri
+import android.provider.DocumentsContract
+import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.gdrivesync.app.data.google.GoogleDriveService
@@ -137,11 +140,14 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             preferencesManager.setDriveFolder(folderId, folderName)
             
-            // Définir le dossier local par défaut
-            val localPath = getApplication<Application>().getExternalFilesDir(null)?.absolutePath
-                ?.plus("/gdrive_sync")
-            if (localPath != null) {
-                preferencesManager.setLocalFolderPath(localPath)
+            // Définir le dossier local par défaut seulement s'il n'est pas déjà défini
+            val currentLocalPath = preferencesManager.getLocalFolderPathSync()
+            if (currentLocalPath == null) {
+                val localPath = getApplication<Application>().getExternalFilesDir(null)?.absolutePath
+                    ?.plus("/gdrive_sync")
+                if (localPath != null) {
+                    preferencesManager.setLocalFolderPath(localPath)
+                }
             }
             
             // Réinitialiser le token de changement pour commencer une nouvelle surveillance
@@ -180,6 +186,54 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             preferencesManager.setSyncIntervalMinutes(minutes)
             if (_uiState.value.autoSyncEnabled) {
                 SyncScheduler.schedulePeriodicSync(getApplication(), minutes)
+            }
+        }
+    }
+    
+    /**
+     * Crée un intent pour sélectionner un dossier local via Storage Access Framework
+     */
+    fun getLocalFolderSelectionIntent(): Intent {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+        intent.addFlags(
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or
+            Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+            Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+        )
+        return intent
+    }
+    
+    /**
+     * Gère le résultat de la sélection de dossier local
+     */
+    fun onLocalFolderSelected(uri: Uri?) {
+        viewModelScope.launch {
+            if (uri == null) {
+                return@launch
+            }
+            
+            try {
+                // Prendre une permission persistante pour le dossier
+                val context = getApplication<Application>()
+                val contentResolver = context.contentResolver
+                contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+                
+                // Vérifier que c'est bien un dossier
+                val documentFile = DocumentFile.fromTreeUri(context, uri)
+                if (documentFile != null && documentFile.isDirectory) {
+                    // Sauvegarder l'URI du dossier
+                    preferencesManager.setLocalFolderPath(uri.toString())
+                    
+                    // Mettre à jour l'état
+                    _uiState.value = _uiState.value.copy(localFolderPath = uri.toString())
+                } else {
+                    android.util.Log.e("SettingsViewModel", "Le URI sélectionné n'est pas un dossier valide")
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("SettingsViewModel", "Erreur lors de la sélection du dossier local", e)
             }
         }
     }

@@ -121,6 +121,9 @@ dependencies {
     // Others
     implementation("androidx.navigation:navigation-compose:2.7.5")
     implementation("androidx.work:work-runtime-ktx:2.9.0")
+    
+    // DocumentFile pour gérer les dossiers sélectionnés via SAF
+    implementation("androidx.documentfile:documentfile:1.0.1")
 }
 
 

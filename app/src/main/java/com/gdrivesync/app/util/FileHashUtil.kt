@@ -1,6 +1,7 @@
 package com.gdrivesync.app.util
 
 import java.io.File
+import java.io.InputStream
 import java.security.MessageDigest
 
 object FileHashUtil {
@@ -37,6 +38,26 @@ object FileHashUtil {
      */
     fun calculateQuickHash(file: File): String {
         return "${file.length()}_${file.lastModified()}"
+    }
+    
+    /**
+     * Calcule un hash rapide depuis un InputStream
+     * Utile pour les fichiers DocumentFile
+     */
+    fun calculateQuickHash(inputStream: InputStream): String {
+        return try {
+            val buffer = ByteArray(8192)
+            var totalBytes = 0L
+            var bytesRead: Int
+            
+            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                totalBytes += bytesRead
+            }
+            
+            "${totalBytes}_${System.currentTimeMillis()}"
+        } catch (e: Exception) {
+            "0_0"
+        }
     }
 }
 

@@ -2,9 +2,15 @@ package com.gdrivesync.app.ui.screens
 
 import android.app.Activity
 import android.app.Activity.RESULT_OK
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.documentfile.provider.DocumentFile
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
@@ -82,6 +88,16 @@ fun SettingsScreen(
         }
     }
     
+    // Launcher pour sélectionner un dossier local
+    val localFolderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val uri = result.data?.data
+            viewModel.onLocalFolderSelected(uri)
+        }
+    }
+    
     LaunchedEffect(Unit) {
         viewModel.loadSettings()
     }
@@ -102,20 +118,21 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
             ) {
                 Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
                         text = "Authentification Google",
-                        style = MaterialTheme.typography.titleLarge
+                        style = MaterialTheme.typography.titleMedium
                     )
                     
                     if (uiState.isSignedIn) {
@@ -170,15 +187,15 @@ fun SettingsScreen(
             
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
             ) {
                 Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
                         text = "Configuration de synchronisation",
-                        style = MaterialTheme.typography.titleLarge
+                        style = MaterialTheme.typography.titleMedium
                     )
                     
                     if (uiState.driveFolderName != null) {
@@ -195,36 +212,103 @@ fun SettingsScreen(
                     }
                     
                     if (uiState.localFolderPath != null) {
-                        Text(
-                            text = "Dossier local: ${uiState.localFolderPath}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "Dossier local:",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState())
+                            ) {
+                                val isUri = uiState.localFolderPath?.startsWith("content://") == true
+                                val displayPath = if (isUri) {
+                                    // Pour les URIs, essayer d'extraire un nom plus lisible
+                                    try {
+                                        val uri = Uri.parse(uiState.localFolderPath)
+                                        val displayName = DocumentFile.fromTreeUri(
+                                            context,
+                                            uri
+                                        )?.name ?: "Dossier sélectionné"
+                                        displayName
+                                    } catch (e: Exception) {
+                                        "Dossier sélectionné"
+                                    }
+                                } else {
+                                    uiState.localFolderPath ?: ""
+                                }
+                                Text(
+                                    text = displayPath,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontFamily = if (!isUri) androidx.compose.ui.text.font.FontFamily.Monospace else null,
+                                    maxLines = 1
+                                )
+                            }
+                            // Afficher une note différente selon le type de chemin
+                            val isUri = uiState.localFolderPath?.startsWith("content://") == true
+                            if (!isUri) {
+                                Text(
+                                    text = "Note: Dossier privé. Accès via Android Studio (Device File Explorer) ou explorateur root.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            } else {
+                                Text(
+                                    text = "Dossier accessible publiquement via l'explorateur de fichiers.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
                     }
                     
-                    Button(
-                        onClick = { 
-                            onNavigateToFolderSelection()
-                        },
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
-                        enabled = uiState.isSignedIn
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text("Sélectionner un dossier Google Drive")
+                        Button(
+                            onClick = { 
+                                onNavigateToFolderSelection()
+                            },
+                            modifier = Modifier.weight(1f),
+                            enabled = uiState.isSignedIn
+                        ) {
+                            Text("Dossier Drive", style = MaterialTheme.typography.bodySmall)
+                        }
+                        
+                        Button(
+                            onClick = {
+                                val intent = viewModel.getLocalFolderSelectionIntent()
+                                localFolderLauncher.launch(intent)
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Dossier local", style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                 }
             }
             
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
             ) {
                 Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
                         text = "Synchronisation automatique",
-                        style = MaterialTheme.typography.titleLarge
+                        style = MaterialTheme.typography.titleMedium
                     )
                     
                     Row(
@@ -234,7 +318,10 @@ fun SettingsScreen(
                     ) {
                         Text(
                             text = "Activer la synchronisation automatique",
-                            style = MaterialTheme.typography.bodyMedium
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f).padding(end = 8.dp),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Switch(
                             checked = uiState.autoSyncEnabled,
