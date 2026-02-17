@@ -26,8 +26,9 @@ class GoogleDriveService(private val context: Context) {
     
     companion object {
         private const val REQUEST_CODE_SIGN_IN = 1001
-        // Utiliser DRIVE_READONLY pour lire tous les fichiers, ou DRIVE pour lecture/écriture
-        private val SCOPES = Collections.singletonList(DriveScopes.DRIVE_READONLY)
+        // Utiliser DRIVE pour lecture/écriture complète sur Drive
+        // (obligatoire pour pouvoir uploader / mettre à jour / supprimer des fichiers)
+        private val SCOPES = Collections.singletonList(DriveScopes.DRIVE)
     }
     
     private var driveService: Drive? = null
@@ -36,7 +37,8 @@ class GoogleDriveService(private val context: Context) {
         context,
         GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
             .requestEmail()
-            .requestScopes(Scope(DriveScopes.DRIVE_READONLY))
+            // On demande le scope DRIVE complet pour autoriser la synchro bidirectionnelle
+            .requestScopes(Scope(DriveScopes.DRIVE))
             .build()
     ).signInIntent
     
@@ -64,7 +66,8 @@ class GoogleDriveService(private val context: Context) {
         
         // Vérifier si le compte a les bons scopes
         val grantedScopes = account.grantedScopes
-        val requiredScope = DriveScopes.DRIVE_READONLY
+        // Pour pouvoir écrire sur Drive, on doit avoir le scope DRIVE complet
+        val requiredScope = DriveScopes.DRIVE
         val hasCorrectScope = grantedScopes?.any { 
             it.toString() == requiredScope 
         } ?: false
@@ -99,7 +102,7 @@ class GoogleDriveService(private val context: Context) {
     fun hasCorrectScope(): Boolean {
         val account = GoogleSignIn.getLastSignedInAccount(context) ?: return false
         val grantedScopes = account.grantedScopes
-        val requiredScope = DriveScopes.DRIVE_READONLY
+        val requiredScope = DriveScopes.DRIVE
         return grantedScopes?.any { it.toString() == requiredScope } ?: false
     }
     
@@ -273,6 +276,23 @@ class GoogleDriveService(private val context: Context) {
             val service = driveService ?: return@withContext false
             val mediaContent = FileContent("application/octet-stream", localFile)
             service.files().update(fileId, null, mediaContent).execute()
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Renomme un fichier côté Drive sans modifier son contenu
+     */
+    suspend fun renameFile(fileId: String, newName: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            ensureDriveServiceInitialized()
+            val service = driveService ?: return@withContext false
+            val fileMetadata = File().apply {
+                name = newName
+            }
+            service.files().update(fileId, fileMetadata).execute()
             true
         } catch (e: Exception) {
             false

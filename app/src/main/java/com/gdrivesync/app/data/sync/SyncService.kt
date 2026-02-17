@@ -35,142 +35,241 @@ class SyncService(
             }
             
             val localFileHelper = LocalFileHelper(context, localFolderPath)
-            
-            // Récupérer les fichiers depuis Drive
-            val driveFiles = driveService.listFiles(driveFolderId)
-            
-            // Récupérer les fichiers locaux
-            val localFiles = getLocalFiles(localFileHelper)
-            
-            // Synchroniser
-            var filesDownloaded = 0
-            var filesUploaded = 0
-            var filesUpdated = 0
-            var filesDeleted = 0
-            
-            // Télécharger les nouveaux fichiers depuis Drive
-            for (driveFile in driveFiles) {
-                val fileName = driveFile.name
-                val existingSyncFile = syncFileDao.getFileById(driveFile.id)
-                
-                if (existingSyncFile == null) {
-                    // Nouveau fichier à télécharger
-                    if (driveFile.mimeType == "application/vnd.google-apps.folder") {
-                        // Créer le dossier local
-                        localFileHelper.createDirectory(fileName)
-                    } else {
-                        if (downloadFileToLocal(driveService, driveFile.id, localFileHelper, fileName)) {
-                            filesDownloaded++
-                        }
-                    }
-                    
-                    // Enregistrer dans la base de données
-                    val fileHash = if (!localFileHelper.isDirectory(fileName) && localFileHelper.exists(fileName)) {
-                        calculateHash(localFileHelper, fileName)
-                    } else null
-                    syncFileDao.insertFile(createSyncFile(driveFile, localFileHelper, fileName, driveFolderId, fileHash))
-                } else {
-                    // Logique "Last Modified Wins" pour résoudre les conflits
-                    val driveModifiedTime = driveFile.modifiedTime?.value ?: 0
-                    val localModifiedTime = if (localFileHelper.exists(fileName)) {
-                        localFileHelper.lastModified(fileName)
-                    } else 0
-                    
-                    // Calculer les hash pour détecter les vraies modifications
-                    val currentLocalHash = if (localFileHelper.exists(fileName) && !localFileHelper.isDirectory(fileName)) {
-                        calculateHash(localFileHelper, fileName)
-                    } else null
-                    
-                    val hasLocalChanged = currentLocalHash != null && 
-                        (currentLocalHash != existingSyncFile.fileHash || 
-                         localModifiedTime > existingSyncFile.modifiedTime)
-                    val hasDriveChanged = driveModifiedTime > existingSyncFile.driveModifiedTime
-                    
-                    when {
-                        // Conflit : les deux ont été modifiés
-                        hasLocalChanged && hasDriveChanged -> {
-                            // Last Modified Wins : utiliser la version la plus récente
-                            if (driveModifiedTime >= localModifiedTime) {
-                                // Drive est plus récent, télécharger
-                                if (driveFile.mimeType != "application/vnd.google-apps.folder") {
-                                    if (downloadFileToLocal(driveService, driveFile.id, localFileHelper, fileName)) {
-                                        filesUpdated++
-                                    }
-                                }
-                            } else {
-                                // Local est plus récent, uploader
-                                if (driveFile.mimeType != "application/vnd.google-apps.folder") {
-                                    if (uploadFileFromLocal(driveService, driveFile.id, localFileHelper, fileName)) {
-                                        filesUploaded++
-                                    }
-                                }
-                            }
-                            syncFileDao.insertFile(createSyncFile(driveFile, localFileHelper, fileName, driveFolderId, currentLocalHash))
-                        }
-                        // Drive modifié uniquement
-                        hasDriveChanged -> {
-                            if (driveFile.mimeType != "application/vnd.google-apps.folder") {
-                                if (downloadFileToLocal(driveService, driveFile.id, localFileHelper, fileName)) {
-                                    filesUpdated++
-                                }
-                            }
-                            syncFileDao.insertFile(createSyncFile(driveFile, localFileHelper, fileName, driveFolderId, currentLocalHash))
-                        }
-                        // Local modifié uniquement
-                        hasLocalChanged -> {
-                            if (driveFile.mimeType != "application/vnd.google-apps.folder") {
-                                if (uploadFileFromLocal(driveService, driveFile.id, localFileHelper, fileName)) {
-                                    filesUploaded++
-                                }
-                            }
-                            syncFileDao.insertFile(createSyncFile(driveFile, localFileHelper, fileName, driveFolderId, currentLocalHash))
-                        }
-                        // Aucun changement détecté
-                        else -> {
-                            // Mettre à jour le hash si nécessaire
-                            if (currentLocalHash != existingSyncFile.fileHash) {
-                                syncFileDao.insertFile(createSyncFile(driveFile, localFileHelper, fileName, driveFolderId, currentLocalHash))
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // Supprimer les fichiers locaux qui n'existent plus sur Drive
-            val driveFileIds = driveFiles.map { it.id }.toSet()
-            val localSyncFiles = syncFileDao.getFilesByFolderId(driveFolderId)
-            
-            for (syncFile in localSyncFiles) {
-                if (!driveFileIds.contains(syncFile.driveFileId)) {
-                    // Extraire le nom du fichier depuis le chemin
-                    val fileName = syncFile.fileName
-                    if (localFileHelper.exists(fileName)) {
-                        localFileHelper.delete(fileName)
-                    }
-                    syncFileDao.deleteFile(syncFile)
-                    filesDeleted++
-                }
-            }
+
+            // Lancer une synchronisation récursive à partir du dossier racine choisi
+            val stats = SyncStats()
+            syncFolder(driveFolderId, localFileHelper, stats)
             
             // Mettre à jour le temps de dernière synchronisation
             preferencesManager.setLastSyncTime(System.currentTimeMillis())
             
             SyncResult.Success(
-                filesDownloaded = filesDownloaded,
-                filesUploaded = filesUploaded,
-                filesUpdated = filesUpdated,
-                filesDeleted = filesDeleted
+                filesDownloaded = stats.filesDownloaded,
+                filesUploaded = stats.filesUploaded,
+                filesUpdated = stats.filesUpdated,
+                filesDeleted = stats.filesDeleted
             )
         } catch (e: Exception) {
             SyncResult.Error(e.message ?: "Erreur inconnue")
         }
     }
-    
-    private fun getLocalFiles(localFileHelper: LocalFileHelper): List<String> {
-        return localFileHelper.listFiles()
+
+    /**
+     * Synchronise récursivement un dossier Drive avec son dossier local correspondant.
+     */
+    private suspend fun syncFolder(
+        driveFolderId: String,
+        localFileHelper: LocalFileHelper,
+        stats: SyncStats
+    ) {
+        // Récupérer les fichiers depuis Drive pour ce dossier
+        val driveFiles = driveService.listFiles(driveFolderId).toMutableList()
+
+        // Télécharger / mettre à jour les fichiers depuis Drive
+        for (driveFile in driveFiles) {
+            val fileName = driveFile.name
+            val existingSyncFile = syncFileDao.getFileById(driveFile.id)
+
+            if (existingSyncFile == null) {
+                // Nouveau fichier à télécharger
+                if (driveFile.mimeType == "application/vnd.google-apps.folder") {
+                    // Créer le dossier local
+                    localFileHelper.createDirectory(fileName)
+                } else {
+                    if (downloadFileToLocal(driveService, driveFile.id, localFileHelper, fileName)) {
+                        stats.filesDownloaded++
+                    }
+                }
+
+                // Enregistrer dans la base de données
+                val fileHash = if (!localFileHelper.isDirectory(fileName) && localFileHelper.exists(fileName)) {
+                    calculateHash(localFileHelper, fileName)
+                } else null
+                syncFileDao.insertFile(createSyncFile(driveFile, localFileHelper, fileName, driveFolderId, fileHash))
+            } else {
+                val localExists = localFileHelper.exists(fileName)
+
+                // Si le dossier a été supprimé localement mais existe toujours sur Drive,
+                // on propage la suppression vers Drive (pour les répertoires uniquement).
+                if (existingSyncFile.isDirectory && !localExists) {
+                    val deletedOnDrive = driveService.deleteFile(driveFile.id)
+                    if (deletedOnDrive) {
+                        syncFileDao.deleteFile(existingSyncFile)
+                        stats.filesDeleted++
+                    }
+                    // Ne pas continuer la synchronisation sur ce dossier supprimé
+                    continue
+                }
+
+                // Logique "Last Modified Wins" pour résoudre les conflits
+                val driveModifiedTime = driveFile.modifiedTime?.value ?: 0
+                val localModifiedTime = if (localExists) {
+                    localFileHelper.lastModified(fileName)
+                } else 0
+
+                // Détection d'un renommage côté Drive : l'ID est identique mais le nom a changé
+                val isRenamedOnDrive = existingSyncFile.fileName != fileName
+
+                // Calculer les hash pour détecter les vraies modifications (uniquement pour les fichiers)
+                val currentLocalHash = if (localExists && !localFileHelper.isDirectory(fileName)) {
+                    calculateHash(localFileHelper, fileName)
+                } else null
+
+                val hasLocalChanged = currentLocalHash != null &&
+                    (currentLocalHash != existingSyncFile.fileHash ||
+                        localModifiedTime > existingSyncFile.modifiedTime)
+                val hasDriveChanged = driveModifiedTime > existingSyncFile.driveModifiedTime
+
+                when {
+                    // Conflit : les deux ont été modifiés
+                    hasLocalChanged && hasDriveChanged -> {
+                        // Last Modified Wins : utiliser la version la plus récente
+                        if (driveModifiedTime >= localModifiedTime) {
+                            // Drive est plus récent, télécharger
+                            if (driveFile.mimeType != "application/vnd.google-apps.folder") {
+                                if (downloadFileToLocal(driveService, driveFile.id, localFileHelper, fileName)) {
+                                    stats.filesUpdated++
+                                }
+                            }
+                        } else {
+                            // Local est plus récent, uploader
+                            if (driveFile.mimeType != "application/vnd.google-apps.folder") {
+                                if (uploadFileFromLocal(driveService, driveFile.id, localFileHelper, fileName)) {
+                                    stats.filesUploaded++
+                                }
+                            }
+                        }
+                        syncFileDao.insertFile(createSyncFile(driveFile, localFileHelper, fileName, driveFolderId, currentLocalHash))
+                    }
+                    // Drive modifié uniquement
+                    hasDriveChanged -> {
+                        if (driveFile.mimeType != "application/vnd.google-apps.folder") {
+                            if (downloadFileToLocal(driveService, driveFile.id, localFileHelper, fileName)) {
+                                stats.filesUpdated++
+                                // Si le fichier a été renommé sur Drive, supprimer l'ancien fichier local
+                                if (isRenamedOnDrive && localFileHelper.exists(existingSyncFile.fileName)) {
+                                    localFileHelper.delete(existingSyncFile.fileName)
+                                    stats.filesDeleted++
+                                }
+                            }
+                        }
+                        syncFileDao.insertFile(createSyncFile(driveFile, localFileHelper, fileName, driveFolderId, currentLocalHash))
+                    }
+                    // Local modifié uniquement
+                    hasLocalChanged -> {
+                        if (driveFile.mimeType != "application/vnd.google-apps.folder") {
+                            if (uploadFileFromLocal(driveService, driveFile.id, localFileHelper, fileName)) {
+                                stats.filesUploaded++
+                            }
+                        }
+                        syncFileDao.insertFile(createSyncFile(driveFile, localFileHelper, fileName, driveFolderId, currentLocalHash))
+                    }
+                    // Aucun changement détecté
+                    else -> {
+                        // Mettre à jour le hash si nécessaire
+                        if (currentLocalHash != existingSyncFile.fileHash) {
+                            syncFileDao.insertFile(createSyncFile(driveFile, localFileHelper, fileName, driveFolderId, currentLocalHash))
+                        }
+                    }
+                }
+            }
+
+            // Si c'est un dossier, synchroniser récursivement son contenu
+            if (driveFile.mimeType == "application/vnd.google-apps.folder") {
+                val subLocalPath = localFileHelper.getAbsolutePath(fileName)
+                val subLocalHelper = LocalFileHelper(context, subLocalPath)
+                syncFolder(driveFile.id, subLocalHelper, stats)
+            }
+        }
+
+        // Supprimer les fichiers locaux qui n'existent plus sur Drive pour ce dossier
+        val driveFileIds = driveFiles.map { it.id }.toSet()
+        val localSyncFiles = syncFileDao.getFilesByFolderId(driveFolderId)
+
+        for (syncFile in localSyncFiles) {
+            if (!driveFileIds.contains(syncFile.driveFileId)) {
+                val fileName = syncFile.fileName
+                if (localFileHelper.exists(fileName)) {
+                    localFileHelper.delete(fileName)
+                }
+                syncFileDao.deleteFile(syncFile)
+                stats.filesDeleted++
+            }
+        }
+
+        // Uploader les nouveaux fichiers locaux qui n'existent pas encore sur Drive pour ce dossier
+        val localFiles = localFileHelper.listFiles()
+        for (fileName in localFiles) {
+            // Si le fichier local n'est associé à aucun fichier Drive (par le nom),
+            // on le crée sur Drive, ou on considère que c'est un renommage local
+            val existingDriveFile = driveFiles.firstOrNull { it.name == fileName }
+            if (existingDriveFile == null) {
+                // Tenter de détecter un renommage local : même contenu qu'un fichier déjà connu
+                val currentLocalHash = if (localFileHelper.exists(fileName) && !localFileHelper.isDirectory(fileName)) {
+                    calculateHash(localFileHelper, fileName)
+                } else null
+
+                val renamedSyncFile = if (currentLocalHash != null) {
+                    localSyncFiles.firstOrNull { syncFile ->
+                        !syncFile.isDirectory &&
+                            syncFile.fileHash == currentLocalHash &&
+                            driveFileIds.contains(syncFile.driveFileId)
+                    }
+                } else null
+
+                if (renamedSyncFile != null) {
+                    // On considère qu'il s'agit d'un renommage sur le smartphone :
+                    // renommer le fichier côté Drive au lieu de créer un doublon
+                    val renamedOnDrive = driveService.renameFile(renamedSyncFile.driveFileId, fileName)
+                    if (renamedOnDrive) {
+                        val updatedSyncFile = renamedSyncFile.copy(
+                            fileName = fileName,
+                            drivePath = fileName,
+                            localPath = localFileHelper.getAbsolutePath(fileName)
+                        )
+                        syncFileDao.insertFile(updatedSyncFile)
+                        // Pas de filesUploaded++ : c'est un renommage, pas un nouvel upload
+                    }
+                } else {
+                    if (localFileHelper.isDirectory(fileName)) {
+                        // Créer le dossier sur Drive
+                        val folderId = driveService.createFolder(fileName, driveFolderId)
+                        if (folderId != null) {
+                            val createdDriveFile = driveService.getFileMetadata(folderId)
+                            if (createdDriveFile != null) {
+                                driveFiles.add(createdDriveFile)
+                                syncFileDao.insertFile(
+                                    createSyncFile(
+                                        createdDriveFile,
+                                        localFileHelper,
+                                        fileName,
+                                        driveFolderId,
+                                        null
+                                    )
+                                )
+                                // Synchroniser récursivement le sous-dossier local nouvellement créé
+                                val subLocalPath = localFileHelper.getAbsolutePath(fileName)
+                                val subLocalHelper = LocalFileHelper(context, subLocalPath)
+                                syncFolder(createdDriveFile.id, subLocalHelper, stats)
+                            }
+                        }
+                    } else {
+                        val createdDriveFile = uploadNewFileFromLocal(
+                            driveService,
+                            localFileHelper,
+                            fileName,
+                            driveFolderId
+                        )
+                        if (createdDriveFile != null) {
+                            driveFiles.add(createdDriveFile)
+                            stats.filesUploaded++
+                        }
+                    }
+                }
+            }
+        }
     }
-    
-    private fun downloadFileToLocal(
+    private suspend fun downloadFileToLocal(
         driveService: GoogleDriveService,
         fileId: String,
         localFileHelper: LocalFileHelper,
@@ -197,7 +296,51 @@ class SyncService(
         }
     }
     
-    private fun uploadFileFromLocal(
+    private suspend fun uploadNewFileFromLocal(
+        driveService: GoogleDriveService,
+        localFileHelper: LocalFileHelper,
+        fileName: String,
+        parentFolderId: String
+    ): DriveFile? {
+        return try {
+            // Créer un fichier temporaire pour uploader
+            val tempFile = File(context.cacheDir, "temp_$fileName")
+            localFileHelper.getInputStream(fileName)?.use { input ->
+                tempFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            val uploadedId = driveService.uploadFile(tempFile, fileName, parentFolderId)
+            tempFile.delete()
+            
+            if (uploadedId != null) {
+                // Récupérer les métadonnées complètes pour enregistrer correctement dans la base
+                val driveFile = driveService.getFileMetadata(uploadedId)
+                if (driveFile != null) {
+                    val fileHash = calculateHash(localFileHelper, fileName)
+                    syncFileDao.insertFile(
+                        createSyncFile(
+                            driveFile,
+                            localFileHelper,
+                            fileName,
+                            parentFolderId,
+                            fileHash
+                        )
+                    )
+                    driveFile
+                } else {
+                    null
+                }
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SyncService", "Erreur lors de l'upload (création) de $fileName", e)
+            null
+        }
+    }
+    
+    private suspend fun uploadFileFromLocal(
         driveService: GoogleDriveService,
         fileId: String,
         localFileHelper: LocalFileHelper,
@@ -269,6 +412,13 @@ class SyncService(
             syncStatus = "synced"
         )
     }
+
+    private data class SyncStats(
+        var filesDownloaded: Int = 0,
+        var filesUploaded: Int = 0,
+        var filesUpdated: Int = 0,
+        var filesDeleted: Int = 0
+    )
     
     sealed class SyncResult {
         data class Success(
