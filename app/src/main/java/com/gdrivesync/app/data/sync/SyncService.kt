@@ -1,5 +1,7 @@
 package com.gdrivesync.app.data.sync
 
+import android.net.Uri
+import androidx.documentfile.provider.DocumentFile
 import android.content.Context
 import com.gdrivesync.app.data.database.SyncDatabase
 import com.gdrivesync.app.data.database.SyncFileDao
@@ -87,8 +89,41 @@ class SyncService(
                 } else null
                 syncFileDao.insertFile(createSyncFile(driveFile, localFileHelper, fileName, driveFolderId, fileHash))
             } else {
-                val localExists = localFileHelper.exists(fileName)
+                // Détection d'un déplacement côté Drive : même ID, mais parentFolderId différent
+                val isMovedOnDrive = existingSyncFile.parentFolderId != driveFolderId
+                // Détection d'un renommage côté Drive : l'ID est identique mais le nom a changé
+                val isRenamedOnDrive = existingSyncFile.fileName != fileName
 
+                // Si un fichier a été déplacé dans un autre dossier Drive, il faut le déplacer localement
+                // (sinon il sera considéré "absent" dans le nouveau dossier et pourra être supprimé au nettoyage).
+                if (isMovedOnDrive && !existingSyncFile.isDirectory && !localFileHelper.exists(fileName)) {
+                    val moved = moveLocalFileByStoredPathToFolder(
+                        sourcePath = existingSyncFile.localPath,
+                        targetFolderHelper = localFileHelper,
+                        targetFileName = fileName
+                    )
+                    if (!moved && driveFile.mimeType != "application/vnd.google-apps.folder") {
+                        // Si on ne peut pas déplacer le fichier local (ex: source introuvable),
+                        // on retélécharge dans le nouvel emplacement.
+                        downloadFileToLocal(driveService, driveFile.id, localFileHelper, fileName)
+                    }
+
+                    val updatedHash = if (localFileHelper.exists(fileName) && !localFileHelper.isDirectory(fileName)) {
+                        calculateHash(localFileHelper, fileName)
+                    } else null
+                    syncFileDao.insertFile(
+                        createSyncFile(
+                            driveFile = driveFile,
+                            localFileHelper = localFileHelper,
+                            fileName = fileName,
+                            parentFolderId = driveFolderId,
+                            fileHash = updatedHash
+                        )
+                    )
+                }
+
+                val localExists = localFileHelper.exists(fileName)
+                
                 // Si le dossier a été supprimé localement mais existe toujours sur Drive,
                 // on propage la suppression vers Drive (pour les répertoires uniquement).
                 if (existingSyncFile.isDirectory && !localExists) {
@@ -101,23 +136,40 @@ class SyncService(
                     continue
                 }
 
+                // Si un fichier a été supprimé localement mais existe toujours sur Drive,
+                // on propage également la suppression vers Drive.
+                // Attention : ne pas confondre avec un renommage effectué sur Drive.
+                // Dans le cas d'un renommage distant, le fichier peut encore exister localement
+                // sous son ancien nom (existingSyncFile.fileName), donc on ne doit pas le supprimer.
+                if (!existingSyncFile.isDirectory && !localExists && !isRenamedOnDrive) {
+                    val deletedOnDrive = driveService.deleteFile(driveFile.id)
+                    if (deletedOnDrive) {
+                        syncFileDao.deleteFile(existingSyncFile)
+                        stats.filesDeleted++
+                    }
+                    // Ne pas tenter de résoudre des conflits sur un fichier supprimé localement
+                    continue
+                }
+
                 // Logique "Last Modified Wins" pour résoudre les conflits
                 val driveModifiedTime = driveFile.modifiedTime?.value ?: 0
                 val localModifiedTime = if (localExists) {
                     localFileHelper.lastModified(fileName)
                 } else 0
 
-                // Détection d'un renommage côté Drive : l'ID est identique mais le nom a changé
-                val isRenamedOnDrive = existingSyncFile.fileName != fileName
-
                 // Calculer les hash pour détecter les vraies modifications (uniquement pour les fichiers)
                 val currentLocalHash = if (localExists && !localFileHelper.isDirectory(fileName)) {
                     calculateHash(localFileHelper, fileName)
                 } else null
 
-                val hasLocalChanged = currentLocalHash != null &&
-                    (currentLocalHash != existingSyncFile.fileHash ||
-                        localModifiedTime > existingSyncFile.modifiedTime)
+                // Un déplacement local (copie + suppression) peut modifier lastModified sans changer le contenu.
+                // On ne doit pas uploader uniquement à cause d'un move détecté côté Drive.
+                val hasLocalContentChanged = currentLocalHash != null && currentLocalHash != existingSyncFile.fileHash
+                val hasLocalChanged = if (isMovedOnDrive) {
+                    hasLocalContentChanged
+                } else {
+                    currentLocalHash != null && (hasLocalContentChanged || localModifiedTime > existingSyncFile.modifiedTime)
+                }
                 val hasDriveChanged = driveModifiedTime > existingSyncFile.driveModifiedTime
 
                 when {
@@ -166,9 +218,18 @@ class SyncService(
                     }
                     // Aucun changement détecté
                     else -> {
-                        // Mettre à jour le hash si nécessaire
-                        if (currentLocalHash != existingSyncFile.fileHash) {
-                            syncFileDao.insertFile(createSyncFile(driveFile, localFileHelper, fileName, driveFolderId, currentLocalHash))
+                        // Si le parent a changé (move côté Drive), on met à jour la DB même si le contenu n'a pas changé.
+                        // Sinon, le nettoyage du dossier parent supprimera l'entrée et potentiellement le fichier local.
+                        if (isMovedOnDrive || currentLocalHash != existingSyncFile.fileHash) {
+                            syncFileDao.insertFile(
+                                createSyncFile(
+                                    driveFile = driveFile,
+                                    localFileHelper = localFileHelper,
+                                    fileName = fileName,
+                                    parentFolderId = driveFolderId,
+                                    fileHash = currentLocalHash
+                                )
+                            )
                         }
                     }
                 }
@@ -403,7 +464,7 @@ class SyncService(
             localPath = localFileHelper.getAbsolutePath(fileName),
             drivePath = driveFile.name,
             mimeType = driveFile.mimeType ?: "",
-            size = (driveFile.size ?: 0L).toLong(),
+            size = driveFile.getSize()?.toLong() ?: 0L,
             modifiedTime = if (localFileHelper.exists(fileName)) localFileHelper.lastModified(fileName) else 0,
             driveModifiedTime = driveFile.modifiedTime?.value ?: 0,
             isDirectory = driveFile.mimeType == "application/vnd.google-apps.folder",
@@ -411,6 +472,39 @@ class SyncService(
             fileHash = hash,
             syncStatus = "synced"
         )
+    }
+
+    private fun moveLocalFileByStoredPathToFolder(
+        sourcePath: String,
+        targetFolderHelper: LocalFileHelper,
+        targetFileName: String
+    ): Boolean {
+        return try {
+            val output = targetFolderHelper.getOutputStream(targetFileName) ?: return false
+            output.use { out ->
+                val input: InputStream? = if (sourcePath.startsWith("content://")) {
+                    context.contentResolver.openInputStream(Uri.parse(sourcePath))
+                } else {
+                    val f = File(sourcePath)
+                    if (!f.exists() || !f.isFile) null else f.inputStream()
+                }
+
+                input?.use { inp ->
+                    inp.copyTo(out)
+                } ?: return false
+            }
+
+            // Supprimer la source après copie
+            if (sourcePath.startsWith("content://")) {
+                val doc = DocumentFile.fromSingleUri(context, Uri.parse(sourcePath))
+                doc?.delete() ?: false
+            } else {
+                File(sourcePath).delete()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SyncService", "Erreur lors du déplacement local de $sourcePath vers $targetFileName", e)
+            false
+        }
     }
 
     private data class SyncStats(

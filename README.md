@@ -4,8 +4,7 @@ Application Android qui synchronise un répertoire Google Drive paramétrable su
 
 ## Fonctionnalités
 
-- ✅ Authentification avec Google Drive
-- ✅ Sélection d'un dossier Google Drive à synchroniser
+- ✅ Authentification avec Google Drive ✅ Sélection d'un dossier Google Drive à synchroniser
 - ✅ Synchronisation bidirectionnelle (téléchargement et upload)
 - ✅ Synchronisation manuelle et automatique
 - ✅ **Synchronisation automatique dès qu'un fichier est modifié sur Google Drive**
